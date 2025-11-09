@@ -1,0 +1,9 @@
+os-sys
+numpy
+pandas
+glob2
+opencv-python
+torch
+torchvision
+pillow
+matplotlib
