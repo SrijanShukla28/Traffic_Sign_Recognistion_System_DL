@@ -5,3 +5,6 @@ hub/
 # Virtual environment
 .venv/
 venv/
+
+# Epochs
+*.pth

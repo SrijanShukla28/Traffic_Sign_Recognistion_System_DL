@@ -1,96 +1,91 @@
 import torch
+import torchvision
 from pycocotools.coco import COCO
+from pycocotools.cocoeval import COCOeval
+import pycocotools.mask as mask_util
 
-def get_coco_api_from_dataset(dataset):
-    """
-    Helper function to get COCO api instance from a dataset.
-    """
-    # Check if dataset is a subset
-    if isinstance(dataset, torch.utils.data.Subset):
-        dataset = dataset.dataset
-        
-    # Check if dataset is the COCO class
-    if isinstance(dataset, COCO):
-        return dataset
+from collections import defaultdict
+import copy
+import numpy as np
 
-    # Check if dataset has a 'coco' attribute
-    if hasattr(dataset, 'coco'):
-        return dataset.coco
-
-    # If dataset is a list or tuple of datasets (e.g. ConcatDataset)
-    if isinstance(dataset, (list, tuple)):
-        if all(hasattr(d, 'coco') for d in dataset):
-            # This is simplified: assumes all datasets share the same coco api
-            return dataset[0].coco
-
-    # Fallback: create a dummy COCO api
-    # This is necessary if the dataset doesn't have a COCO api (e.g., custom dataset)
-    # We create a simple one based on image_ids and categories
+# This is the new, corrected function
+def convert_to_coco_api(ds):
+    coco_ds = COCO()
+    dataset = {"images": [], "categories": [], "annotations": []}
+    categories = set()
     
-    # Try to get categories from the dataset
-    categories = []
-    if hasattr(dataset, 'get_categories'):
-         categories = dataset.get_categories()
-    elif hasattr(dataset, 'categories'):
-         categories = dataset.categories
-    else:
-         # Create dummy categories if not available (1-indexed)
-         print("Warning: Creating dummy COCO API. Category mapping might be incorrect.")
-         # Let's try to infer from the dataset's targets
-         all_labels = set()
-         if hasattr(dataset, '__getitem__'):
-             # This is slow, but a last resort
-             # print("Inferring categories from dataset items... This might be slow.")
-             for idx in range(min(len(dataset), 100)): # Check first 100
-                 try:
-                     _, target = dataset[idx]
-                     if 'labels' in target:
-                         all_labels.update(target['labels'].tolist())
-                 except:
-                     pass # __getitem__ might not return (img, target)
-         
-         if not all_labels:
-             print("Could not infer categories. Evaluation might fail or be incorrect.")
-             all_labels = set(range(1, 92)) # Default to 91 COCO classes
-             
-         categories = [{"id": int(i), "name": str(i), "supercategory": "none"} for i in sorted(list(all_labels))]
-
-
-    coco_gt = COCO()
-    coco_gt.dataset = {'images': [], 'annotations': [], 'categories': categories}
+    # --- THIS IS THE FIX ---
+    # We iterate through the dataset 'ds' (which is the Subset)
+    # The 'img_idx' here will be 0 to 99 (for the 100 images in the test set)
+    print(f"Converting {len(ds)} images from the test set to COCO format...")
     
-    image_ids = list(range(len(dataset))) # Use index as image_id
-    coco_gt.dataset['images'] = [{'id': img_id} for img_id in image_ids]
-
-    # Create dummy annotations
-    ann_id = 1
-    for idx, img_id in enumerate(image_ids):
-        target = None
+    for img_idx in range(len(ds)):
         try:
-            _, target = dataset[idx]
-        except:
+            # Get the image and its targets from the dataset (this calls the Subset's __getitem__)
+            img, targets = ds[img_idx]
+            
+            # The image_id is the *original* index, which is what we want
+            image_id = targets["image_id"].item()
+            
+            # Create the image info dictionary
+            img_dict = {}
+            img_dict["id"] = image_id
+            img_dict["height"] = img.shape[-2]
+            img_dict["width"] = img.shape[-1]
+            dataset["images"].append(img_dict)
+            
+            # Get annotation data
+            bboxes = targets["boxes"]
+            if bboxes.shape[0] > 0:
+                # Convert [x1, y1, x2, y2] to [x1, y1, width, height]
+                bboxes[:, 2:] -= bboxes[:, :2]
+                bboxes = bboxes.tolist()
+                labels = targets["labels"].tolist()
+                areas = targets["area"].tolist()
+                iscrowd = targets["iscrowd"].tolist()
+
+                # Create annotation dictionaries for this image
+                for i in range(len(bboxes)):
+                    ann = {}
+                    ann["image_id"] = image_id
+                    ann["bbox"] = bboxes[i]
+                    ann["category_id"] = labels[i]
+                    categories.add(labels[i])
+                    ann["area"] = areas[i]
+                    ann["iscrowd"] = iscrowd[i]
+                    # Give a unique ID to each annotation
+                    ann["id"] = len(dataset["annotations"]) + 1
+                    dataset["annotations"].append(ann)
+        
+        except Exception as e:
+            # This might happen if an image in the test set has no annotations
+            # print(f"Error or no annotations for image {img_idx} (Image ID: {image_id}): {e}")
             continue
             
-        boxes = target.get('boxes', [])
-        labels = target.get('labels', [])
-        
-        if isinstance(boxes, torch.Tensor):
-            boxes = boxes.tolist()
-        if isinstance(labels, torch.Tensor):
-            labels = labels.tolist()
+    # Create the categories list
+    dataset["categories"] = [{"id": i, "name": str(i), "supercategory": "none"} for i in sorted(categories)]
+    
+    # Load our fully-formed 'dataset' dict into the coco_ds object
+    if dataset["annotations"]:
+        coco_ds.dataset = dataset
+        coco_ds.createIndex()
+    else:
+        print("--- WARNING: No annotations found in the test set! ---")
 
-        for box, label in zip(boxes, labels):
-            box_xywh = [box[0], box[1], box[2] - box[0], box[3] - box[1]]
-            ann = {
-                'id': ann_id,
-                'image_id': img_id,
-                'category_id': label,
-                'bbox': box_xywh,
-                'area': box_xywh[2] * box_xywh[3],
-                'iscrowd': 0
-            }
-            coco_gt.dataset['annotations'].append(ann)
-            ann_id += 1
-            
-    coco_gt.createIndex()
-    return coco_gt
+    print("Conversion to COCO format complete.")
+    return coco_ds
+
+
+def get_coco_api_from_dataset(dataset):
+    for _ in range(10):
+        if isinstance(dataset, torchvision.datasets.CocoDetection):
+            break
+        # We NO LONGER want to unwrap the Subset
+        # if isinstance(dataset, torch.utils.data.Subset):
+        #     dataset = dataset.dataset
+    
+    if isinstance(dataset, torchvision.datasets.CocoDetection):
+        return dataset.coco
+        
+    # 'dataset' is our Subset. We pass it directly.
+    return convert_to_coco_api(dataset)
